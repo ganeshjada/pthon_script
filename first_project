@@ -1,1 +1,387 @@
 
+import json
+import pandas as pd
+import numpy as np
+import sqlalchemy
+import os
+import datetime
+from ParamStore import ParamStore
+import requests
+import boto3
+from io import StringIO
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+
+
+INDEX_NAME = "placeindex"
+location_client = boto3.client("location")
+
+
+
+
+class EquipTrack:
+    def __init__(self, env):
+        user_path = '/fleet/' + env
+        ps = ParamStore()
+        auth = ps.read_param_store(user_path)
+        
+        self.mySql_host = auth['mysql-host']
+        self.mySql_User = auth['mysql-user']
+        self.mySql_Password = auth['mysql-password']
+        self.mySql_Db = auth['mysql-db']
+
+    def WriteToMySql(self, Df, TableName):
+        database_connection = sqlalchemy.create_engine('mysql+mysqlconnector://{0}:{1}@{2}/{3}'.
+                                                    format(self.mySql_User, self.mySql_Password,
+                                                            self.mySql_host, self.mySql_Db))
+        Df.to_sql(con=database_connection, name=TableName, if_exists='append', index=False)
+        
+  
+
+    def ProcessStatistics(self, JsonData, unixTimeStamp):
+        print("ProcessStatistics funtion start")
+        new_df = pd.io.json.json_normalize(JsonData, record_path=['data', 'vehicleDataList'])
+        new_df = new_df.drop(columns=['name'])
+        new_df.columns = new_df.columns.map(lambda x: x[3:] if x[0:3] == 'mw.' else x)
+        new_df['unixTimeStamp'] = pd.to_datetime(unixTimeStamp, unit='s')
+        new_df['unixTimeStampNew'] = new_df['unixTimeStamp']  # Same timestamp as string (varchar)
+
+        average_speed = JsonData['data']['totalMw']['averageSpeed']
+        new_df['averageSpeed'] = average_speed
+        self.WriteToMySql(new_df, 'omnicom_utilization')
+        database_connection = sqlalchemy.create_engine('mysql+mysqlconnector://{0}:{1}@{2}/{3}'.
+                                                    format(self.mySql_User, self.mySql_Password,
+                                                            self.mySql_host, self.mySql_Db))
+      
+        database_connection.execute('call yantralive_fleet.data_load_yl_fleet_utilization_agg_d()')
+
+        #self.load_mysql_agg()
+        print("data_load_yl_fleet_utilization_agg_d store procedure calling done")
+
+    def ProcessStatisticstenmint(self, JsonData, unixTimeStamp):
+        print("ProcessStatistics funtion start")
+        new_df = pd.io.json.json_normalize(JsonData, record_path=['data', 'vehicleDataList'])
+        new_df = new_df.drop(columns=['name'])
+        new_df.columns = new_df.columns.map(lambda x: x[3:] if x[0:3] == 'mw.' else x)
+        new_df['unixTimeStamp'] = pd.to_datetime(unixTimeStamp, unit='s')
+        new_df['unixTimeStampNew'] = new_df['unixTimeStamp']  # Same timestamp as string (varchar)
+
+        average_speed = JsonData['data']['totalMw']['averageSpeed']
+        new_df['averageSpeed'] = average_speed
+        self.WriteToMySql(new_df, 'omnicom_utilization_tenmin')
+        database_connection = sqlalchemy.create_engine('mysql+mysqlconnector://{0}:{1}@{2}/{3}'.
+                                                    format(self.mySql_User, self.mySql_Password,
+                                                            self.mySql_host, self.mySql_Db))
+
+
+    def ProcessFuel(self, JsonData, unixTimeStamp):
+        new_df = pd.io.json.json_normalize(JsonData, record_path=['data', 'vehicleDataList'])
+        new_df.columns = new_df.columns.map(lambda x: x[5:] if x[0:5] == 'fuel.' else x)
+        new_df['unixTimeStamp'] = pd.to_datetime(unixTimeStamp, unit='s')
+        self.WriteToMySql(new_df, 'omnicom_Fuel_Utilization')
+        database_connection = sqlalchemy.create_engine('mysql+mysqlconnector://{0}:{1}@{2}/{3}'.
+                                                    format(self.mySql_User, self.mySql_Password,
+                                                            self.mySql_host, self.mySql_Db))
+      
+        database_connection.execute('call yantralive_fleet.data_load_iot_fuel_agg_d()')
+
+        #self.load_mysql_agg()
+        print("data_load_iot_fuel_agg_d store procedure calling done")
+
+    def ProcessFuelLevel(self, JsonData, vehicleId):
+        print(JsonData)
+        new_df = pd.io.json.json_normalize(JsonData, record_path=['tankData','data'], meta = [['tankdata','tankCapacity'], ['tankdata','tankNumber']] )
+        new_df.rename(columns={'rV': 'RawFuelVolume', 'aV':'SmoothedFuelVolume', 'eD': 'unixTimeStamp'}, inplace = True)
+        new_df.columns = new_df.columns.map(lambda x: x[9:] if x[0:9] == 'tankdata.' else x)
+        new_df['unixTimeStamp'] = pd.to_datetime(new_df['unixTimeStamp'], unit='s')
+        new_df['vehicleId'] = vehicleId
+        self.WriteToMySql(new_df, 'omnicom_Fuel_Level')
+
+
+    # def get_display_name(self,lat, lon):
+    #     BASE_API_URL = "https://nominatim.openstreetmap.org/reverse"
+
+    #     try:
+    #         # Construct the API request
+    #         params = {
+    #             "lat": lat,
+    #             "lon": lon,
+    #             "format": "json",
+    #         }
+    #         headers = {
+    #             "User-Agent": "YourAppName/1.0 (your_email@example.com)",
+    #             "Accept-Language": "en",  # Replace with your app and contact info
+    #         }
+    #         response = requests.get(BASE_API_URL, params=params, headers=headers)
+    #         if response.status_code == 200:
+    #             response_json = response.json()
+    #             return response_json.get("display_name", "Unknown Address")
+    #         elif response.status_code == 403:
+    #             return "Access Denied: Too many requests or missing headers."
+    #         else:
+    #             return f"API Error: {response.status_code}"
+    #     except Exception as e:
+    #         return f"Error: {str(e)}"
+
+    # # Add a new column to the DataFrame for display_name
+    # def process_with_throttling(self,df):
+    #     results = []
+    #     for _, row in df.iterrows():
+    #         results.append(self.get_display_name(row["Latitude"], row["Longtitude"]))
+    #         time.sleep(1)  # Respect the API's usage limits by adding a delay
+    #     return results
+    
+    # def get_display_name(self, lat, lon):
+    #     try:
+    #         response = location_client.search_place_index_for_position(
+    #             IndexName=INDEX_NAME,
+    #             Position=[lon, lat]  # AWS expects Longitude first
+    #         )
+    #         results = response.get('Results', [])
+    #         if results:
+    #             return results[0]['Place']['Label']
+    #         else:
+    #             return "No address found"
+    #     except Exception as e:
+    #         return f"Error fetching address: {e}"
+
+    # def get_display_name(self, lat, lon):
+    #     try:
+    #         response = location_client.search_place_index_for_position(
+    #             IndexName=INDEX_NAME,
+    #             Position=[lon, lat],  # AWS expects Longitude first
+    #             Language="en"  # Force response in English
+    #         )
+    #         results = response.get('Results', [])
+    #         if results:
+    #             return results[0]['Place']['Label']
+    #         else:
+    #             return "No address found"
+    #     except Exception as e:
+    #         return f"Error fetching address: {e}"
+
+    def get_display_name(self, lat, lon):
+        try:
+            response = location_client.search_place_index_for_position(
+                IndexName=INDEX_NAME,
+                Position=[lon, lat],  # AWS expects Longitude first
+                Language="en",  # Force response in English
+                MaxResults=5  # Get more detailed results
+            )
+            results = response.get('Results', [])
+            if results:
+                # Extract multiple components to form a detailed address
+                place = results[0]['Place']
+                components = [
+                    place.get('Street', ''),  # Street address (if available)
+                    place.get('Neighborhood', ''),  # Neighborhood
+                    place.get('Municipality', ''),  # City/District
+                    place.get('Region', ''),  # State/Province
+                    place.get('Country', '')  # Country
+                ]
+                # Filter out empty components and join
+                return ", ".join(filter(None, components))
+            else:
+                return "No address found"
+        except Exception as e:
+            return f"Error fetching address: {e}"
+
+
+    def process_with_throttling(self, df, max_workers=10, delay=0.2):
+        results = []
+        unique_coords = df[['Latitude', 'Longtitude']].drop_duplicates()
+        coord_to_address = {}
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_coord = {
+                executor.submit(self.get_display_name, lat, long): (lat, long)
+                for lat, long in unique_coords.to_numpy()
+            }
+            
+            for future in as_completed(future_to_coord):
+                lat, long = future_to_coord[future]
+                try:
+                    address = future.result()
+                except Exception as exc:
+                    address = "Error fetching address"
+                
+                coord_to_address[(lat, long)] = address
+                time.sleep(delay)  # Throttling for API rate limits
+
+        df["address"] = df.apply(lambda row: coord_to_address[(row["Latitude"], row["Longtitude"])], axis=1)
+        return df["address"]
+
+
+    def snap_to_roads(self,api_key, df, batch_size=95):
+        base_url = "https://roads.googleapis.com/v1/snapToRoads"
+        
+
+        # Initialize new columns
+        df["new_latitude"] = None
+        df["new_longitude"] = None
+
+        # Process in batches
+        for i in range(0, len(df), batch_size):
+            batch_df = df.iloc[i:i + batch_size]
+            print(f"Processing batch {i // batch_size + 1}, Sending {len(batch_df)} points")
+
+            # API request logic here (as in your original code)
+            points = list(zip(batch_df['Latitude'], batch_df['Longtitude']))
+            path = "|".join([f"{lat},{lng}" for lat, lng in points])
+            params = {"path": path, "interpolate": "true", "key": api_key}
+            response = requests.get(base_url, params=params)
+            response_json = response.json()
+
+            if "snappedPoints" in response_json:
+                snapped_points = response_json["snappedPoints"]
+                snapped_dict = {p["originalIndex"]: (p["location"]["latitude"], p["location"]["longitude"]) 
+                                for p in snapped_points if "originalIndex" in p}
+
+                # Assign snapped values
+                for idx, (lat, lng) in snapped_dict.items():
+                    df.at[i + idx, "new_latitude"] = lat  # Adjust index
+                    df.at[i + idx, "new_longitude"] = lng
+
+        # Handle missing values by retrying each missing point separately
+        missing_indices = df[df["new_latitude"].isna()].index
+        if len(missing_indices) > 0:
+            print(f"Retrying API for {len(missing_indices)} missing points...")
+            for idx in missing_indices:
+                lat, lng = df.at[idx, "latitude"], df.at[idx, "longitude"]
+                single_point_url = f"{base_url}?path={lat},{lng}&key={api_key}"
+                single_response = requests.get(single_point_url).json()
+
+                if "snappedPoints" in single_response:
+                    snapped = single_response["snappedPoints"][0]["location"]
+                    df.at[idx, "new_latitude"] = snapped["latitude"]
+                    df.at[idx, "new_longitude"] = snapped["longitude"]
+
+        # Fill remaining missing values using forward-fill and backward-fill
+        df["new_latitude"] = df["new_latitude"].ffill()  # Forward fill
+        df["new_latitude"] = df["new_latitude"].bfill()  # Backward fill
+        df["new_longitude"] = df["new_longitude"].ffill()  # Forward fill
+        df["new_longitude"] = df["new_longitude"].bfill()  # Backward fill
+
+        return df
+
+
+    def ProcessTrack(self, JsonData):
+        # if  len(JsonData['data']['track']) == 0:
+        # JsonData is empty, so return without processing
+        #   return
+        new_df = pd.io.json.json_normalize(JsonData, record_path=['data', 'track'], meta=[['data', 'vehicleId']])
+        print(new_df.columns)
+        if 'p' in new_df.columns:
+        # Expand the 'p' column into separate columns
+            new_df[['Fuel_Level', 'Stoppage_Indicator', 'Ignition_Indicator']] = pd.DataFrame(
+            new_df.p.tolist(), index=new_df.index
+        )
+        # new_df[['Fuel_Level',  'Stoppage_Indicator',  'Ignition_Indicator']]= pd.DataFrame(new_df.p.tolist(), index= new_df.index)  #making list in p column into seperate columns
+        new_df = new_df.drop(columns=['e','p'])
+        new_df.rename(columns={'s': 'Speed', 'd':'Direction', 'v': 'GPSValidityAttribute', 'lt':'Latitude', 'lg':'Longtitude', 
+        'm': 'Mileage', 'ed':'EventUnixTimestamp'}, inplace = True)
+        new_df.columns = new_df.columns.map(lambda x: x[5:] if x[0:5] == 'data.' else x)
+        new_df['EventUnixTimestamp'] = pd.to_datetime(new_df['EventUnixTimestamp'], unit='s')
+        print("TRACK DF:",new_df)
+        new_df["address"] = self.process_with_throttling(new_df)
+        print(f"Type of df after address: {type(new_df)}")  # Should be <class 'pandas.DataFrame'>
+
+        pd.set_option("display.max_colwidth", None)
+        print(f"Type of set_option: {type(new_df)}")  # Should be <class 'pandas.DataFrame'>
+
+        print("TRACK DF:",new_df)
+        api_key = "AIzaSyAmpMZDU9MIHy12W7WhJkWhvOuMsW_0-mU"
+        print(f"Type of df before snapped calling : {type(new_df)}")  # Should be <class 'pandas.DataFrame'>
+        
+        print(f"Dataframe {new_df.head()}") # Used to print the fifrst 5 rows only
+
+        snapped_df = self.snap_to_roads(api_key, new_df)
+        print("snapped_df :",snapped_df)
+
+        self.WriteToMySql(snapped_df, 'omnicom_track')
+
+    def ProcessActivity(self, JsonData, vehicleId):
+        new_df = pd.io.json.json_normalize(JsonData, record_path=['events'])
+        print("The columns of the DataFrame are:")
+        print(new_df.keys())
+
+        if new_df.empty:
+            return "df is empty"
+        else:
+            # Process parameters column into separate EventParameter fields
+            if 'parameters' in new_df.columns and not new_df['parameters'].isnull().all():
+                new_columns = ['EventParameter1', 'EventParameter2', 'EventParameter3', 'EventParameter4']
+                new_df['parameters'] = new_df['parameters'].apply(lambda x: x if x is not None else [])
+                new_df[new_columns] = pd.DataFrame([
+                    [params[i] if i < len(params) else '' for i in range(len(new_columns))]
+                    for params in new_df['parameters']
+                ], index=new_df.index)
+
+            new_df = new_df.drop(columns='parameters')
+            new_df.rename(columns={'type': 'event_type', 'latitude': 'Latitude', 'longitude': 'Longitude',
+                                'timestamp': 'UnixTimestamp', 'eventAddress': 'EventAddress'}, inplace=True)
+            new_df.columns = new_df.columns.map(lambda x: x[5:] if x.startswith('data.') else x)
+            new_df['UnixTimestamp'] = new_df['UnixTimestamp'].apply(lambda x: datetime.datetime.fromtimestamp(x))
+
+            # Define helper functions
+            def format_duration(seconds):
+                days = seconds // 86400  # Number of seconds in a day
+                hours = (seconds % 86400) // 3600  # Remaining seconds to hours
+                minutes = (seconds % 3600) // 60  # Remaining seconds to minutes
+                secs = seconds % 60  # Remaining seconds
+                duration = []
+                if days > 0:
+                    duration.append(f"{days} d")
+                if hours > 0:
+                    duration.append(f"{hours} h")
+                if minutes > 0:
+                    duration.append(f"{minutes} min")
+                if secs > 0:
+                    duration.append(f"{secs} sec")
+                return ' '.join(duration)
+
+            def calculate_violation(row):
+                event_type = row['event_type']
+                # Safely convert to float or default to 0 if conversion fails
+                event_param2 = pd.to_numeric(row.get('EventParameter2', 0), errors='coerce') or 0
+                event_param3 = pd.to_numeric(row.get('EventParameter3', 0), errors='coerce') or 0
+
+                if event_type == 43:
+                    violation = "Stoppage lasts longer than 60 seconds"
+                    value = round(event_param2 / 60, 1)  # Convert to minutes
+                    parameter_value = f"Duration {format_duration(round(event_param2, 1))}"
+                elif event_type in [12, 14]:
+                    violation = "Speed is higher than 60 km/h"
+                    value = round(event_param2, 1)
+                    parameter_value = (
+                        f"Average speed of {event_param2} km/h exceeds the permissible speed during {format_duration(event_param3)}"
+                    )
+                else:
+                    violation = value = parameter_value = None
+
+                return pd.Series([violation, value, parameter_value])
+
+
+            # Apply violation logic
+            new_df[['Violation', 'Value', 'parameters_value']] = new_df.apply(calculate_violation, axis=1)
+
+            # Write additional columns
+            def get_Activity(x):
+                activity_map = {
+                    1: 'refuellingStart', 2: 'refuellingEnd', 3: 'drainingStart', 4: 'drainingEnd',
+                    5: 'ignitionOn', 6: 'ignitionOff', 13: 'standstillEnd', 100: 'standstillStart',
+                    43: 'stoppageEnd', 42: 'stoppageStart', 12: 'Instant speed threshold exceeded',14:'Start of exceeding the speed threshold'
+                }
+                return activity_map.get(x, ' ')
+
+            def get_Status(x):
+                return 'Online' if x == 5 else 'Offline' if x == 6 else ' '
+            new_df['Activity'] = new_df['event_type'].apply(get_Activity)
+            new_df['status'] = new_df['event_type'].apply(get_Status)
+            new_df['vehicleId'] = vehicleId
+            new_df['unixTimeStampNew'] = new_df['UnixTimestamp']  # Same timestamp as string (varchar)
+
+            # Write updated DataFrame to MySQL
+            print("ACTIVITY DF:", new_df)
+            self.WriteToMySql(new_df, 'omnicom_events')
